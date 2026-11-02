@@ -1,0 +1,93 @@
+{
+  "id": "dev.kagan.browser-automation",
+  "name": "Browser Automation",
+  "version": "0.1.0",
+  "kagan": ">=0.1.3",
+  "entry": "main.js",
+  "icon": "icon.svg",
+  "instructions": "Local headless Chrome for this machine. Open a session, then run short scripts (goto, snapshot, click, fill, shot). Not the sidebar Browser tab and not remote hosts. Runs node/npm through bash so GUI PATH still finds Homebrew or nvm. First open installs playwright-core into ~/.kagan/plugins/dev.kagan.browser-automation.",
+  "powers": {
+    "areas": ["process"],
+    "run": [
+      { "program": "bash", "env": "inherit" }
+    ]
+  },
+  "commands": [
+    {
+      "id": "show",
+      "title": "Show Browser Automation",
+      "when": "thread"
+    }
+  ],
+  "ui": {
+    "panels": [
+      {
+        "id": "sessions",
+        "title": "Browser",
+        "view": "BrowserPanel",
+        "placement": "right",
+        "follows": "thread"
+      }
+    ]
+  },
+  "cli": [
+    {
+      "name": "browser-automation",
+      "commands": [
+        { "name": "prepare", "usage": "prepare" },
+        { "name": "open", "usage": "open [--headed] [--thread <id>]" },
+        { "name": "list", "usage": "list [--thread <id>]" },
+        { "name": "run", "usage": "run <session-id> --script <js> [--timeout-ms <n>]" },
+        { "name": "pages", "usage": "pages <session-id>" },
+        { "name": "screenshot", "usage": "screenshot <session-id>" },
+        { "name": "stop", "usage": "stop <session-id>" },
+        { "name": "close", "usage": "close <session-id>" }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "browser_open",
+      "description": "Open a local Chrome session for this thread (headless by default).",
+      "input": "schemas/browser_open.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_run",
+      "description": "Run a trusted browser script in an open session. Use browser.getPage(\"main\").",
+      "input": "schemas/browser_run.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_screenshot",
+      "description": "Capture a JPEG of the main page in a session.",
+      "input": "schemas/browser_session.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_pages",
+      "description": "List pages in a session.",
+      "input": "schemas/browser_session.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_list",
+      "description": "List browser sessions for this thread.",
+      "input": "schemas/browser_empty.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_stop",
+      "description": "Stop Chrome for a session without deleting its record.",
+      "input": "schemas/browser_session.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_close",
+      "description": "Close a session and remove its Chrome profile.",
+      "input": "schemas/browser_session.json",
+      "scope": "all"
+    }
+  ],
+  "skills": ["skills/browser-automation"]
+}
