@@ -7,7 +7,7 @@
   "icon": "icon.svg",
   "instructions": "Local headless Chrome for this machine on one persistent profile, so logins survive a close. Open a session, then run short scripts (goto, snapshot, click, fill, shot). The Browser tab in the right sidebar shows the session live; a click or keystroke there reaches the same page a script drives. Sessions are tabs owned by the thread that opened them and expire after 30 minutes, or after 5 idle minutes. First open installs playwright-core into the plugin's data folder.",
   "powers": {
-    "areas": ["process"],
+    "areas": ["process", "threads"],
     "run": [
       { "program": "bash", "env": "inherit" }
     ]
