@@ -1,437 +1,457 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Local headless Chrome sessions for the kagan browser-automation plugin.
- * Speaks JSON on stdout. Sessions keep a Chrome process alive and reconnect over CDP.
+ * The node half of the plugin: one short-lived process per call, speaking JSON
+ * on stdout. The plugin runs it through `bash` so a GUI PATH still finds
+ * Homebrew or nvm. Chrome, the runtime install and the records live in their
+ * own modules; this file is the commands.
  */
 import { spawn } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { createRequire } from "node:module";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import {
+  BROWSER_GRACE_MS,
+  BrowserError,
+  MAX_SESSIONS,
+  SCRIPT_LIMIT,
+  SESSION_TTL_MS,
+  TIMEOUT_DEFAULT_MS,
+  assertOwner,
+  errorBody,
+  expireRecord,
+  filePath,
+  liveness,
+  parseJson,
+  unavailable,
+} from "./core.js";
+import { browserApi, connectOver, ensurePage, listPages, pageTitle, targetId } from "./driver.js";
+import { boundedTimeout } from "./cli.js";
+import * as browser from "./browser.js";
+import * as chrome from "./chrome.js";
+import * as runtime from "./runtime.js";
+import { anyReady, closeTab, requireSession, withPage } from "./session.js";
+import {
+  RUN_LOCK_STALE_MS,
+  acquire,
+  allSessions,
+  readSession,
+  requiredThread,
+  runLockPath,
+  sessionPath,
+  takeLock,
+  threadDir,
+  writeSession,
+} from "./store.js";
+import { applyInput, preview } from "./view.js";
 
-const DEFAULT_DATA = join(homedir(), ".kagan", "plugins", "dev.kagan.browser-automation");
+const DEFAULT_DATA = join(homedir(), ".kagan", "plugins", "dev.kagan.browser-automation", "data");
+const RUNNER = filePath(new URL("./runner.mjs", import.meta.url).href);
 
-function fail(message, code = 1) {
-  process.stderr.write(String(message).endsWith("\n") ? message : `${message}\n`);
-  process.exit(code);
+/* ------------------------------------------------------------------ *
+ * Plumbing
+ * ------------------------------------------------------------------ */
+
+/** @param {unknown} error */
+function fail(error) {
+  process.stderr.write(`${JSON.stringify(errorBody(error))}\n`);
+  process.exit(1);
 }
 
+/** @param {unknown} value */
 function out(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+/** @param {string} name @param {string} [fallback] */
 function arg(name, fallback) {
-  const i = process.argv.indexOf(name);
-  if (i === -1) return fallback;
-  return process.argv[i + 1] ?? fallback;
+  const at = process.argv.indexOf(name);
+  return at === -1 ? fallback : process.argv[at + 1];
 }
 
-function has(flag) {
-  return process.argv.includes(flag);
+/** @param {string} name */
+function has(name) {
+  return process.argv.includes(name);
 }
 
 function dataRoot() {
   return arg("--data") ?? DEFAULT_DATA;
 }
 
-function sessionsDir(data) {
-  return join(data, "sessions");
+/* ------------------------------------------------------------------ *
+ * Commands
+ * ------------------------------------------------------------------ */
+
+/** @param {string} data */
+async function cmdPrepare(data) {
+  out(await runtime.prepare(data));
 }
 
-function sessionPath(data, id) {
-  return join(sessionsDir(data), id);
-}
-
-function readSession(data, id) {
-  const file = join(sessionPath(data, id), "session.json");
-  if (!existsSync(file)) fail(`session ${id} not found`, 2);
-  return JSON.parse(readFileSync(file, "utf8"));
-}
-
-function writeSession(data, record) {
-  const dir = sessionPath(data, record.id);
-  mkdirSync(dir, { recursive: true });
-  const file = join(dir, "session.json");
-  const tmp = `${file}.tmp`;
-  writeFileSync(tmp, JSON.stringify(record, null, 2));
-  renameSync(tmp, file);
-}
-
-function alive(pid) {
-  if (!pid) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function loadPlaywright(data) {
-  const runtime = join(data, "runtime");
-  const pkg = join(runtime, "node_modules", "playwright-core", "package.json");
-  if (!existsSync(pkg)) {
-    mkdirSync(runtime, { recursive: true });
-    writeFileSync(
-      join(runtime, "package.json"),
-      JSON.stringify({ private: true, dependencies: { "playwright-core": "1.63.0" } }, null, 2),
-    );
-    await runNpm(runtime, ["install", "--ignore-scripts", "--no-fund", "--no-audit"]);
-  }
-  const require = createRequire(join(runtime, "package.json"));
-  return require("playwright-core");
-}
-
-function runNpm(cwd, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn("npm", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve(undefined);
-      else reject(new Error(stderr.trim() || `npm exited ${code}`));
-    });
-  });
-}
-
-function chromeCandidates() {
-  return [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "google-chrome",
-    "google-chrome-stable",
-    "chromium",
-    "chromium-browser",
-  ];
-}
-
-async function launchChrome(userDataDir, headless) {
-  const args = [
-    `--user-data-dir=${userDataDir}`,
-    "--remote-debugging-port=0",
-    "--remote-allow-origins=*",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-background-networking",
-    "--disable-component-update",
-    "--disable-features=Translate,MediaRouter",
-    "--disable-sync",
-    "--no-sandbox",
-    ...(headless ? ["--headless=new"] : []),
-    "about:blank",
-  ];
-  let lastError = null;
-  for (const bin of chromeCandidates()) {
-    try {
-      const errFd = openSync(join(userDataDir, "chrome.err"), "a");
-      const child = spawn(bin, args, {
-        detached: true,
-        stdio: ["ignore", "ignore", errFd],
-      });
-      // New process group so close can signal every Chrome helper.
-      try {
-        process.kill(-child.pid, 0);
-      } catch {
-        /* group may not exist yet on all platforms */
-      }
-      child.unref();
-      const endpoint = await waitForEndpoint(userDataDir, child.pid);
-      return { pid: child.pid, endpoint, binary: bin };
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError ?? new Error("Chrome/Chromium not found");
-}
-
-async function waitForEndpoint(userDataDir, pid) {
-  const started = Date.now();
-  while (Date.now() - started < 20_000) {
-    if (!alive(pid)) throw new Error("Chrome exited before DevTools was ready");
-    const candidates = [
-      join(userDataDir, "DevToolsActivePort"),
-      join(userDataDir, "Default", "DevToolsActivePort"),
-    ];
-    for (const file of candidates) {
-      if (!existsSync(file)) continue;
-      const lines = readFileSync(file, "utf8").trim().split("\n");
-      if (lines.length >= 1 && /^\d+$/.test(lines[0])) {
-        // Playwright connectOverCDP wants the HTTP debugger URL.
-        return `http://127.0.0.1:${lines[0]}`;
-      }
-    }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error("timed out waiting for Chrome DevTools");
-}
-
-async function connect(playwright, endpoint) {
-  const browser = await playwright.chromium.connectOverCDP(endpoint);
-  const context = browser.contexts()[0] ?? (await browser.newContext());
-  let page = context.pages()[0];
-  if (!page) page = await context.newPage();
-  return { browser, context, page };
-}
-
-function pageApi(page, shotDir) {
-  let shot = 0;
-  return {
-    async goto(url, options) {
-      await page.goto(url, { waitUntil: "domcontentloaded", ...(options ?? {}) });
-      return page.url();
-    },
-    async snapshot() {
-      if (typeof page._snapshotForAI === "function") {
-        return page._snapshotForAI();
-      }
-      const tree = await page.accessibility.snapshot({ interestingOnly: true });
-      return JSON.stringify(tree, null, 2);
-    },
-    async click(selector) {
-      if (String(selector).startsWith("ref/") || String(selector).startsWith("e")) {
-        const ref = String(selector).replace(/^ref\//, "");
-        await page.locator(`aria-ref=${ref}`).click({ timeout: 15_000 });
-        return;
-      }
-      await page.locator(selector).first().click({ timeout: 15_000 });
-    },
-    async fill(selector, value) {
-      await page.locator(selector).first().fill(String(value), { timeout: 15_000 });
-    },
-    async type(selector, value) {
-      await page.locator(selector).first().pressSequentially(String(value), { timeout: 15_000 });
-    },
-    async press(key) {
-      await page.keyboard.press(key);
-    },
-    async title() {
-      return page.title();
-    },
-    async url() {
-      return page.url();
-    },
-    async content() {
-      return page.content();
-    },
-    async evaluate(fn, arg) {
-      return page.evaluate(fn, arg);
-    },
-    async waitForSelector(selector, options) {
-      await page.waitForSelector(selector, options);
-    },
-    async shot(options = {}) {
-      mkdirSync(shotDir, { recursive: true });
-      shot += 1;
-      const file = join(shotDir, `shot-${shot}.jpg`);
-      await page.screenshot({
-        path: file,
-        type: "jpeg",
-        quality: options.quality ?? 70,
-        fullPage: Boolean(options.fullPage),
-      });
-      return { path: file, mimeType: "image/jpeg" };
-    },
-    locator(selector) {
-      return page.locator(selector);
-    },
-    raw: page,
-  };
-}
-
-async function withSession(data, id, fn) {
-  const record = readSession(data, id);
-  if (record.state !== "ready") fail(`session ${id} is ${record.state}`, 2);
-  if (!alive(record.pid)) fail(`session ${id} chrome is not running; open a new session`, 2);
-  const playwright = await loadPlaywright(data);
-  const { browser, page } = await connect(playwright, record.endpoint);
-  try {
-    const shotDir = join(sessionPath(data, id), "shots");
-    const api = {
-      getPage(name = "main") {
-        if (name !== "main") throw new Error('only page "main" is available in this port');
-        return pageApi(page, shotDir);
-      },
-      pages: async () => [{ id: "main", url: page.url(), title: await page.title() }],
-    };
-    return await fn(api, record, page);
-  } finally {
-    await browser.close().catch(() => undefined);
-  }
-}
-
+/** @param {string} data */
 async function cmdOpen(data) {
-  const threadId = arg("--thread") ?? "none";
+  const threadId = requiredThread(arg("--thread"));
   const headless = !has("--headed");
+  mkdirSync(threadDir(data, threadId), { recursive: true });
+  const live = allSessions(data, threadId).filter(
+    (record) => record.state === "ready" && liveness(record, Date.now()) === "ok",
+  );
+  if (live.length >= MAX_SESSIONS) {
+    throw new BrowserError(
+      `this thread already has ${MAX_SESSIONS} sessions; close one first`,
+      "setup_failed",
+    );
+  }
+  await runtime.ensure(data);
   const id = randomUUID();
-  const dir = sessionPath(data, id);
-  mkdirSync(dir, { recursive: true });
-  const userDataDir = join(dir, "chrome-profile");
-  mkdirSync(userDataDir, { recursive: true });
-  await loadPlaywright(data);
-  const launched = await launchChrome(userDataDir, headless);
-  const record = {
-    id,
-    threadId,
-    backend: "local",
-    state: "ready",
-    headless,
-    pid: launched.pid,
-    endpoint: launched.endpoint,
-    binary: launched.binary,
-    createdAt: Date.now(),
-    expiresAt: Date.now() + 30 * 60_000,
-  };
-  writeSession(data, record);
+  // A session is one tab in the plugin's shared browser. Holding the browser
+  // lock keeps a matching stop from taking the browser away mid-open.
+  const record = await browser.locked(data, async () => {
+    // With no session using it, an idle browser can change to the asked mode.
+    const current = browser.running(data);
+    if (current && current.headless !== headless && !anyReady(data)) {
+      await browser.stopLocked(data);
+    }
+    const connection = await browser.ensureLocked(data, { headless, chrome: arg("--chrome") });
+    const { browser: connected, context } = await connectOver(runtime.path(data), connection.endpoint);
+    try {
+      const page = await context.newPage();
+      await page.goto("about:blank").catch(() => undefined);
+      const now = Date.now();
+      /** @type {import("./core.js").SessionRecord} */
+      const created = {
+        id,
+        threadId,
+        state: "ready",
+        headless,
+        pageId: await targetId(page),
+        createdAt: now,
+        expiresAt: now + SESSION_TTL_MS,
+        lastUsed: now,
+        url: "about:blank",
+        title: "",
+        sequence: 0,
+      };
+      writeSession(data, created);
+      return created;
+    } finally {
+      await connected.close().catch(() => undefined);
+    }
+  });
   out(record);
 }
 
+/** @param {string} data */
 async function cmdList(data) {
-  const root = sessionsDir(data);
-  if (!existsSync(root)) {
-    out([]);
-    return;
-  }
-  const { readdirSync } = await import("node:fs");
-  const thread = arg("--thread");
-  const list = [];
-  for (const id of readdirSync(root)) {
-    try {
-      const record = readSession(data, id);
-      if (thread && record.threadId !== thread) continue;
-      if (record.state === "ready" && !alive(record.pid)) {
-        record.state = "stopped";
-        writeSession(data, record);
-      }
-      list.push(record);
-    } catch {
-      /* skip */
+  const threadId = requiredThread(arg("--thread"));
+  const sessions = allSessions(data, threadId);
+  const up = browser.running(data) !== null;
+  for (const record of sessions) {
+    if (expireRecord(record, Date.now())) {
+      writeSession(data, record);
+    } else if (record.state === "ready" && !up) {
+      record.state = "stopped";
+      record.reason = "gone";
+      writeSession(data, record);
     }
   }
-  out(list);
+  sessions.sort((left, right) => left.createdAt - right.createdAt);
+  if (!anyReady(data)) scheduleStop(data);
+  out(sessions);
 }
 
+/** @param {string} data */
 async function cmdRun(data) {
-  const id = arg("--session");
-  if (!id) fail("--session required");
-  const script = arg("--script");
-  const scriptFile = arg("--script-file");
-  let source = script;
-  if (scriptFile) source = readFileSync(scriptFile, "utf8");
-  if (!source) fail("pass --script or --script-file");
-  const timeoutMs = Number(arg("--timeout-ms", "30000"));
-  const result = await withSession(data, id, async (browser) => {
-    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-    const run = new AsyncFunction("browser", `"use strict";\n${source}`);
-    const value = await Promise.race([
-      run(browser),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`run timed out after ${timeoutMs}ms`)), timeoutMs),
-      ),
-    ]);
-    const text =
-      value === undefined || value === null
-        ? ""
-        : typeof value === "string"
-          ? value
-          : JSON.stringify(value, null, 2);
-    return { text: text.slice(0, 160_000), images: [], exitCode: 0 };
+  const threadId = requiredThread(arg("--thread"));
+  const id = sessionArgument();
+  const timeoutMs = boundedTimeout(arg("--timeout-ms", String(TIMEOUT_DEFAULT_MS)));
+  const source = readScript();
+  const dir = sessionPath(data, threadId, id);
+  const lock = runLockPath(data, threadId, id);
+  await acquire(lock, RUN_LOCK_STALE_MS);
+  try {
+    const { record, connection } = requireSession(data, threadId, id);
+    const scriptFile = join(dir, "script.js");
+    writeFileSync(scriptFile, source);
+    try {
+      const result = await execute(data, record, connection, scriptFile, timeoutMs);
+      record.lastUsed = Date.now();
+      record.url = result.url;
+      record.title = result.title;
+      writeSession(data, record);
+      out({ text: result.text, images: result.images, exitCode: 0 });
+    } finally {
+      rmSync(scriptFile, { force: true });
+    }
+  } finally {
+    rmSync(lock, { force: true });
+  }
+}
+
+/**
+ * The script runs in its own process, so a loop that never yields cannot hold
+ * the host open: the timeout kills the process group and stops the session.
+ * @param {string} data
+ * @param {import("./core.js").SessionRecord} record
+ * @param {import("./browser.js").Browser} connection
+ * @param {string} scriptFile
+ * @param {number} timeoutMs
+ */
+async function execute(data, record, connection, scriptFile, timeoutMs) {
+  const dir = sessionPath(data, record.threadId, record.id);
+  const child = spawn(
+    process.execPath,
+    [
+      RUNNER,
+      "--runtime",
+      runtime.path(data),
+      "--endpoint",
+      connection.endpoint,
+      "--page",
+      record.pageId,
+      "--shots",
+      join(dir, "shots"),
+      "--pages",
+      join(dir, "pages.json"),
+      "--script",
+      scriptFile,
+    ],
+    { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
   });
-  const record = readSession(data, id);
-  record.lastUsed = Date.now();
-  writeSession(data, record);
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const exited = new Promise((resolve) => child.on("close", (code) => resolve(code ?? 1)));
+  let timer;
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
+  });
+  const outcome = await Promise.race([exited, timedOut]);
+  clearTimeout(timer);
+  if (outcome === "timeout") {
+    chrome.terminate(child.pid);
+    await new Promise((resolve) => child.on("close", resolve));
+    record.state = "stopped";
+    record.reason = "timeout";
+    writeSession(data, record);
+    if (!anyReady(data)) scheduleStop(data);
+    throw unavailable(record);
+  }
+  if (outcome !== 0) throw runnerFailure(stderr, Number(outcome));
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    throw new BrowserError("the script runner printed no result", "command_failed");
+  }
+}
+
+/** @param {string} stderr @param {number} code */
+function runnerFailure(stderr, code) {
+  for (const line of stderr.trim().split("\n").reverse()) {
+    const body = parseJson(line);
+    if (body?.error?.message) {
+      return new BrowserError(
+        String(body.error.message),
+        String(body.error.code ?? "command_failed"),
+        String(body.error.hint ?? ""),
+      );
+    }
+  }
+  return new BrowserError(stderr.trim() || `the script runner exited ${code}`, "command_failed");
+}
+
+function readScript() {
+  const script = arg("--script");
+  const file = arg("--script-file");
+  if ((script === undefined) === (file === undefined)) {
+    throw new BrowserError("pass exactly one of --script or --script-file", "invalid_option");
+  }
+  const source =
+    file === undefined
+      ? script ?? ""
+      : readFileSync(resolve(arg("--cwd") ?? process.cwd(), file), "utf8");
+  if (source.trim() === "") throw new BrowserError("the script is empty", "invalid_option");
+  if (source.length > SCRIPT_LIMIT) {
+    throw new BrowserError(`the script is longer than ${SCRIPT_LIMIT} characters`, "invalid_option");
+  }
+  return source;
+}
+
+/** @param {string} data */
+async function cmdPages(data) {
+  const threadId = requiredThread(arg("--thread"));
+  const id = sessionArgument();
+  const result = await withPage(data, threadId, id, async (pages, record) => {
+    const list = await listPages(pages);
+    record.lastUsed = Date.now();
+    writeSession(data, record);
+    return { text: JSON.stringify(list, null, 2), images: [], exitCode: 0 };
+  });
   out(result);
 }
 
-async function cmdPages(data) {
-  const id = arg("--session");
-  if (!id) fail("--session required");
-  const pages = await withSession(data, id, async (browser) => browser.pages());
-  out({ text: JSON.stringify(pages, null, 2), images: [], exitCode: 0 });
-}
-
+/** @param {string} data */
 async function cmdScreenshot(data) {
-  const id = arg("--session");
-  if (!id) fail("--session required");
-  const result = await withSession(data, id, async (browser) => {
-    const page = browser.getPage("main");
-    const image = await page.shot();
+  const threadId = requiredThread(arg("--thread"));
+  const id = sessionArgument();
+  const name = arg("--page", "main") ?? "main";
+  const shots = join(sessionPath(data, threadId, id), "shots");
+  const result = await withPage(data, threadId, id, async (pages, record) => {
+    const target = await ensurePage(pages, name);
+    const browser = browserApi(pages, shots);
+    const page = await browser.getPage(name);
+    const image = await page.shot({ quality: 70 });
+    const shot = browser.images.at(-1);
+    record.lastUsed = Date.now();
+    record.url = target.url();
+    record.title = await pageTitle(target);
+    writeSession(data, record);
     return {
       text: image.path,
-      images: [image],
+      images: [
+        {
+          path: image.path,
+          mimeType: "image/jpeg",
+          width: shot?.width ?? 0,
+          height: shot?.height ?? 0,
+        },
+      ],
       exitCode: 0,
     };
   });
   out(result);
 }
 
-async function killChrome(pid) {
-  if (!pid) return;
-  // Detached Chrome often leaves children; signal the process group when possible.
-  for (const target of [-pid, pid]) {
-    try {
-      process.kill(target, "SIGTERM");
-    } catch {
-      /* ignore */
-    }
-  }
-  const started = Date.now();
-  while (alive(pid) && Date.now() - started < 3_000) {
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  for (const target of [-pid, pid]) {
-    try {
-      process.kill(target, "SIGKILL");
-    } catch {
-      /* ignore */
-    }
-  }
-  await new Promise((r) => setTimeout(r, 300));
+/** @param {string} data */
+async function cmdPreview(data) {
+  const threadId = requiredThread(arg("--thread"));
+  const id = sessionArgument();
+  out({ frame: await preview(data, threadId, id, arg("--quality")) });
 }
 
+/** @param {string} data */
+async function cmdInput(data) {
+  const threadId = requiredThread(arg("--thread"));
+  const id = sessionArgument();
+  await applyInput(data, threadId, id, arg("--kind") ?? "", {
+    x: arg("--x"),
+    y: arg("--y"),
+    delta: arg("--delta"),
+    text: arg("--text"),
+    key: arg("--key"),
+    page: arg("--page", "main"),
+  });
+  out({ ok: true });
+}
+
+function sessionArgument() {
+  const id = arg("--session");
+  if (!id) throw new BrowserError("pass --session <id>", "invalid_option");
+  return id;
+}
+
+/** @param {string} data */
 async function cmdStop(data) {
-  const id = arg("--session");
-  if (!id) fail("--session required");
-  const record = readSession(data, id);
-  await killChrome(record.pid);
-  record.state = "stopped";
-  writeSession(data, record);
-  out(record);
+  const threadId = requiredThread(arg("--thread"));
+  out(await endSession(data, threadId, sessionArgument(), "stopped"));
 }
 
+/** @param {string} data */
 async function cmdClose(data) {
-  const id = arg("--session");
-  if (!id) fail("--session required");
-  const record = readSession(data, id);
-  await killChrome(record.pid);
-  record.state = "closed";
-  writeSession(data, record);
-  // Keep session.json for list history; drop chrome profile + shots.
-  rmSync(join(sessionPath(data, id), "chrome-profile"), { recursive: true, force: true });
-  rmSync(join(sessionPath(data, id), "shots"), { recursive: true, force: true });
+  const threadId = requiredThread(arg("--thread"));
+  const id = sessionArgument();
+  const record = await endSession(data, threadId, id, "closed");
+  const dir = sessionPath(data, threadId, id);
+  rmSync(join(dir, "shots"), { recursive: true, force: true });
   out(record);
 }
 
-async function cmdPrepare(data) {
-  await loadPlaywright(data);
-  out({ status: "ready", version: "1.63.0", source: "playwright-core" });
+/**
+ * Closes the session's tab, then the shared browser when it was the last
+ * session using it. The profile, and every login in it, stays on disk.
+ * @param {string} data
+ * @param {string} threadId
+ * @param {string} id
+ * @param {"stopped" | "closed"} state
+ */
+async function endSession(data, threadId, id, state) {
+  const record = await browser.locked(data, async () => {
+    const found = readSession(data, threadId, id);
+    assertOwner(found, threadId);
+    await closeTab(data, found);
+    found.state = state;
+    found.reason = state;
+    writeSession(data, found);
+    return found;
+  });
+  // Chrome keeps its cookies (and session-only logins) while it stays up; the
+  // reaper stops it after the grace, unless another session uses it.
+  if (!anyReady(data)) scheduleStop(data);
+  return record;
 }
 
-const command = process.argv[2];
-const data = dataRoot();
-mkdirSync(data, { recursive: true });
+/**
+ * A detached process stops the idle browser after the grace, even if kagan has
+ * quit in the meantime. Several may run; each checks the browser it saw.
+ * @param {string} data
+ */
+function scheduleStop(data) {
+  const current = browser.read(data);
+  if (!current) return;
+  // One reaper per idle period; the panel polls the list, so this must not
+  // spawn a sleeper on every look.
+  if (!takeLock(join(data, "reap.lock"), BROWSER_GRACE_MS + 60_000)) return;
+  const child = spawn(
+    process.execPath,
+    [
+      filePath(new URL(import.meta.url).href),
+      "reap",
+      "--data",
+      data,
+      "--pid",
+      String(current.pid),
+      "--after",
+      String(BROWSER_GRACE_MS),
+    ],
+    { detached: true, stdio: "ignore" },
+  );
+  child.unref();
+}
+
+/**
+ * @param {string} data
+ */
+async function cmdReap(data) {
+  const pid = Number(arg("--pid", "0"));
+  const after = Number(arg("--after", "0"));
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, after)));
+  try {
+    const current = browser.read(data);
+    if (!current || current.pid !== pid) {
+      out({ stopped: false, reason: "replaced" });
+      return;
+    }
+    if (anyReady(data)) {
+      out({ stopped: false, reason: "in-use" });
+      return;
+    }
+    await browser.locked(data, () => browser.stopLocked(data));
+    out({ stopped: true });
+  } finally {
+    rmSync(join(data, "reap.lock"), { force: true });
+  }
+}
+
+/** Stops the browser now, keeping its profile. */
+async function cmdShutdown(data) {
+  await browser.locked(data, () => browser.stopLocked(data));
+  out({ stopped: true });
+}
 
 const commands = {
   prepare: cmdPrepare,
@@ -440,12 +460,21 @@ const commands = {
   run: cmdRun,
   pages: cmdPages,
   screenshot: cmdScreenshot,
+  preview: cmdPreview,
+  input: cmdInput,
+  reap: cmdReap,
+  shutdown: cmdShutdown,
   stop: cmdStop,
   close: cmdClose,
 };
 
-if (!commands[command]) {
-  fail(`unknown command ${command ?? ""}. use prepare|open|list|run|pages|screenshot|stop|close`);
-}
+const command = process.argv[2];
+const data = dataRoot();
+mkdirSync(data, { recursive: true });
 
-commands[command](data).catch((error) => fail(error instanceof Error ? error.message : String(error)));
+const handler = commands[command];
+if (!handler) {
+  fail(new BrowserError(`unknown command '${command ?? ""}'`, "invalid_option"));
+} else {
+  Promise.resolve(handler(data)).catch(fail);
+}

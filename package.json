@@ -2,7 +2,13 @@
   "name": "kagan-browser-automation-host",
   "private": true,
   "type": "module",
-  "dependencies": {
-    "playwright-core": "1.63.0"
+  "main": "main.js",
+  "bin": {
+    "kagan-browser-host": "host.mjs",
+    "kagan-browser-runner": "runner.mjs"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:e2e": "KG_E2E=1 node --test e2e.test.js"
   }
 }
