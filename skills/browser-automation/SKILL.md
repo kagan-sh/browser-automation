@@ -1,77 +1,73 @@
 ---
 name: browser-automation
-description: Control a local headless Chrome session from this thread — open pages, snapshot, click, fill forms, and take screenshots. The Browser tab in the right sidebar shows the session live. Use for UI checks and web flows inside kagan.
+description: Drive kagan's built-in Browser tab for this thread — open one http or https page, read a snapshot, and click, fill, type, press, select, or scroll using whole-number refs.
 ---
 
-Use `kg browser-automation` (or the `browser_*` tools). Open one session, keep
-its id, then act in short scripts. The right-sidebar **Browser** tab follows the
-thread and shows the page, so the person can watch and click along; you and the
-person drive the same page.
-
-This plugin runs **local headless Chrome** on the machine where kagan runs. It
-cannot drive kagan's built-in Browser tab (the host keeps it; decision 117), and
-there is no remote host list. Prefer headless unless the person asked to watch a
-real window (`--headed` / `headed: true`).
+Use the `browser_*` tools, or `kg browser-automation`. This drives the built-in
+Browser tab for the thread you are in. There is one page per window. The person
+sees that same tab. You do not get a second Browser.
 
 ## Open
 
 ```sh
-kg browser-automation open --json
-kg browser-automation open --headed --json
+kg browser-automation open https://example.com --json
 ```
 
-Tools: `browser_open`. Retain the returned `id`. The first open installs
-`playwright-core` into the plugin data folder (needs npm), then opens Chrome.
+Tool: `browser_open` with `{ "url": "https://example.com" }`. http and https
+open. A bare name such as `example.com` loads over https. A local host such as
+`localhost:3000` loads over http. Anything else is refused by the host.
 
-## Run scripts
+Another thread already driving the page is refused, and the message names that
+thread. `browser_close` or `kg browser close` stops driving and leaves the page
+open for the person.
+
+## Read
 
 ```sh
-kg browser-automation run <session-id> --script 'const p = await browser.getPage("main"); await p.goto("https://example.com"); return await p.title()' --json
-kg browser-automation run <session-id> --script 'const p = await browser.getPage("main"); await p.click("text=Sign in"); return await p.snapshot()' --json
-kg browser-automation run <session-id> --script-file ./check.js --json
+kg browser-automation snapshot --json
+kg browser-automation status --json
 ```
 
-The script receives `browser`:
+Tools: `browser_snapshot`, `browser_status`.
 
-- `await browser.getPage("main")` → page helpers. Any other name is a named tab
-  that persists between runs.
-- `browser.listPages()` → `[{ name, url, title }]`
-- Page helpers: `goto`, `snapshot`, `click`, `fill`, `type`, `press`, `title`,
-  `url`, `content`, `evaluate`, `waitForSelector`, `shot`, `locator`, `raw`
-  (the Playwright page).
+A snapshot lists each control as `[ref] role "name"`. `ref` is a whole number.
+Use it with click, fill, and select. Take a fresh snapshot after a navigation
+or another snapshot: the old refs are gone. `truncated` means the host cut the
+snapshot. There is no screenshot and no script you can run against the page.
 
-`snapshot()` returns Playwright's AI ARIA snapshot with refs like `e12`.
-`click("e12")` or `click("ref/e12")` uses a ref; any other string is a
-Playwright locator (`#email`, `text=Submit`). Take a snapshot in the same run
-before clicking a ref, and a fresh one after navigation: refs follow document
-order.
-
-`shot()` writes a JPEG under the session folder and returns `{ path, mimeType }`.
-A run may keep at most 4 JPEGs, 500 KB together; anything larger fails the run.
-Prefer a cheap snapshot or URL check after each step and a screenshot when
-visual proof matters.
-
-## Other commands
+## Act
 
 ```sh
-kg browser-automation list --json
-kg browser-automation pages <session-id> --json
-kg browser-automation screenshot <session-id> [--page main] --json
-kg browser-automation preview <session-id> --json
-kg browser-automation stop <session-id> --json
-kg browser-automation close <session-id> --json
+kg browser-automation click 2 --json
+kg browser-automation fill 3 ada@example.com --json
+kg browser-automation type hello --json
+kg browser-automation press enter --json
+kg browser-automation select 4 Blue --json
+kg browser-automation scroll 200 --json
+kg browser-automation goto https://example.org --json
+kg browser-automation back --json
+kg browser-automation forward --json
+kg browser-automation reload --json
 ```
 
-`stop` closes the session's tab and keeps its record; `close` also removes its
-captures. Neither clears the profile: logins, cookies and `localStorage` survive
-a close and come back on the next open, because every session is a tab in one
-Chrome. Sessions belong to the thread that opened them and expire after 30
-minutes, or after 5 idle minutes; `run`, `pages` and `screenshot` count as use.
-Runs in one session are serialized, and a script past its timeout
-(`--timeout-ms 30000`, or `--timeout 90s`) stops the session. Reopen when the
-tab is gone.
+Tools: `browser_click`, `browser_fill`, `browser_type`, `browser_press`,
+`browser_select`, `browser_scroll`, `browser_goto`, `browser_back`,
+`browser_forward`, `browser_reload`.
 
-Every command takes `--json` for machine output and `--help` for its flags.
-With `--json`, a failure prints `{"ok":false,"error":{code,message,hint}}` on
-stdout and exits non-zero; `session_unavailable` means reopen, and
-`screenshot_limit` means the capture budget was passed.
+`fill` writes the text you pass. It does not read a file. A ref that is not a
+whole number is refused before the call. `press` takes `enter`, `escape`,
+`tab`, `space`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`,
+`end`, `pageup`, `pagedown`, or one character.
+
+## Close
+
+```sh
+kg browser-automation close --json
+```
+
+Tool: `browser_close`. Driving stops. The page stays open, with its address in
+the field. The host ends a quiet page after 30 minutes on the next command.
+
+Every command takes `--json` and `--help`. Outside a thread, pass `--thread`.
+A call from a thread cannot name another thread. On Linux the host answers
+`The browser works on macOS and Windows only for now.`

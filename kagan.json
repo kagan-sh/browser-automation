@@ -1,96 +1,118 @@
 {
   "id": "dev.kagan.browser-automation",
   "name": "Browser Automation",
-  "version": "0.2.0",
-  "kagan": ">=0.1.3",
+  "version": "0.3.0",
+  "kagan": ">=0.1.0",
   "entry": "main.js",
   "icon": "icon.svg",
-  "instructions": "Local headless Chrome for this machine on one persistent profile, so logins survive a close. Open a session, then run short scripts (goto, snapshot, click, fill, shot). The Browser tab in the right sidebar shows the session live; a click or keystroke there reaches the same page a script drives. Sessions are tabs owned by the thread that opened them and expire after 30 minutes, or after 5 idle minutes. First open installs playwright-core into the plugin's data folder.",
+  "instructions": "Drives the built-in Browser tab for this thread. Open one http or https page, then use snapshot refs — whole numbers — to click, fill, type, press, select, and scroll. Fill writes text. One page per window. Close stops driving and leaves the page open.",
   "powers": {
-    "areas": ["process", "threads"],
-    "run": [
-      { "program": "bash", "env": "inherit" }
-    ]
+    "areas": ["browser"]
   },
-  "settings": {
-    "chromePath": { "type": "string", "title": "Chrome executable" }
-  },
-  "commands": [
-    {
-      "id": "show",
-      "title": "Show Browser Automation",
-      "when": "thread"
-    }
-  ],
-  "ui": {
-    "panels": [
-      {
-        "id": "sessions",
-        "title": "Browser",
-        "web": "ui/index.html",
-        "placement": "right",
-        "follows": "thread"
-      }
-    ]
-  },
-  "events": ["thread.archived", "thread.deleted"],
   "cli": [
     {
       "name": "browser-automation",
       "commands": [
-        { "name": "prepare", "usage": "prepare" },
-        { "name": "open", "usage": "open [--headed] [--thread <id>] [--json]" },
-        { "name": "list", "usage": "list [--thread <id>] [--json]" },
-        { "name": "run", "usage": "run <session-id> (--script <js> | --script-file <path>) [--timeout-ms <n>] [--json]" },
-        { "name": "pages", "usage": "pages <session-id> [--json]" },
-        { "name": "screenshot", "usage": "screenshot <session-id> [--page <name>] [--json]" },
-        { "name": "preview", "usage": "preview <session-id> [--json]" },
-        { "name": "stop", "usage": "stop <session-id> [--json]" },
-        { "name": "close", "usage": "close <session-id> [--json]" }
+        { "name": "open", "usage": "open <url> [--thread <id>] [--json]" },
+        { "name": "status", "usage": "status [--thread <id>] [--json]" },
+        { "name": "snapshot", "usage": "snapshot [--thread <id>] [--json]" },
+        { "name": "goto", "usage": "goto <url> [--thread <id>] [--json]" },
+        { "name": "back", "usage": "back [--thread <id>] [--json]" },
+        { "name": "forward", "usage": "forward [--thread <id>] [--json]" },
+        { "name": "reload", "usage": "reload [--thread <id>] [--json]" },
+        { "name": "click", "usage": "click <ref> [--thread <id>] [--json]" },
+        { "name": "fill", "usage": "fill <ref> <text> [--thread <id>] [--json]" },
+        { "name": "type", "usage": "type <text> [--thread <id>] [--json]" },
+        { "name": "press", "usage": "press <key> [--thread <id>] [--json]" },
+        { "name": "select", "usage": "select <ref> <option> [--thread <id>] [--json]" },
+        { "name": "scroll", "usage": "scroll <dy> [--thread <id>] [--json]" },
+        { "name": "close", "usage": "close [--thread <id>] [--json]" }
       ]
     }
   ],
   "tools": [
     {
       "name": "browser_open",
-      "description": "Open a local headless Chrome session for this thread. The right-sidebar Browser tab shows it live.",
-      "input": "schemas/browser_open.json",
+      "description": "Open the built-in Browser tab for this thread and load an address. http and https open. A bare name such as example.com loads over https, and a local host such as localhost:3000 loads over http. One page per window.",
+      "input": "schemas/browser_url.json",
       "scope": "all"
     },
     {
-      "name": "browser_run",
-      "description": "Run a trusted browser script in an open session. Use const p = await browser.getPage(\"main\"), then p.goto, p.snapshot, p.click, p.fill, p.shot. Runs in one session are serialized.",
-      "input": "schemas/browser_run.json",
-      "scope": "all"
-    },
-    {
-      "name": "browser_screenshot",
-      "description": "Capture a JPEG of the main page in a session and return its path.",
-      "input": "schemas/browser_session.json",
-      "scope": "all"
-    },
-    {
-      "name": "browser_pages",
-      "description": "List the pages in a session, with their names, URLs and titles.",
-      "input": "schemas/browser_session.json",
-      "scope": "all"
-    },
-    {
-      "name": "browser_list",
-      "description": "List browser sessions for this thread, newest state first.",
+      "name": "browser_status",
+      "description": "Read the built-in Browser tab this thread is driving: url, title, and whether that tab is showing.",
       "input": "schemas/browser_empty.json",
       "scope": "all"
     },
     {
-      "name": "browser_stop",
-      "description": "Stop Chrome for a session, keeping its record and profile.",
-      "input": "schemas/browser_session.json",
+      "name": "browser_snapshot",
+      "description": "Read the page in the built-in Browser tab. Each control has a whole-number ref for click, fill, and select. Refs last until the next snapshot or navigation.",
+      "input": "schemas/browser_empty.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_goto",
+      "description": "Load another http or https address in this thread's Browser tab. A bare name and a local host follow the same rule as browser_open. Old refs are gone.",
+      "input": "schemas/browser_url.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_back",
+      "description": "Go back in this thread's Browser tab.",
+      "input": "schemas/browser_empty.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_forward",
+      "description": "Go forward in this thread's Browser tab.",
+      "input": "schemas/browser_empty.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_reload",
+      "description": "Reload this thread's Browser tab.",
+      "input": "schemas/browser_empty.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_click",
+      "description": "Click the control with this whole-number ref from the latest snapshot of the built-in Browser tab.",
+      "input": "schemas/browser_ref.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_fill",
+      "description": "Write text into the control with this whole-number ref. The text is the argument. There is no file.",
+      "input": "schemas/browser_fill.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_type",
+      "description": "Type text into the focused control in the built-in Browser tab.",
+      "input": "schemas/browser_text.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_press",
+      "description": "Press a key in the focused control: enter, escape, tab, space, backspace, delete, up, down, left, right, home, end, pageup, pagedown, or one character.",
+      "input": "schemas/browser_key.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_select",
+      "description": "Choose an option in the select with this whole-number ref, by its value or its label.",
+      "input": "schemas/browser_select.json",
+      "scope": "all"
+    },
+    {
+      "name": "browser_scroll",
+      "description": "Scroll the built-in Browser tab by dy pixels. Positive is down.",
+      "input": "schemas/browser_scroll.json",
       "scope": "all"
     },
     {
       "name": "browser_close",
-      "description": "Close a session, stop Chrome and remove its profile and captures.",
-      "input": "schemas/browser_session.json",
+      "description": "Stop driving the built-in Browser tab. The page stays open for the person.",
+      "input": "schemas/browser_empty.json",
       "scope": "all"
     }
   ],
