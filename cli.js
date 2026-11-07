@@ -1,104 +1,133 @@
 // @ts-check
 /**
- * The command line: flags, validation and the sentence a person reads without
- * `--json`. Shared by the plugin's CLI job and its tests.
+ * `kg browser-automation <verb>`. The verbs are the host's. `--file` is not one
+ * of them: fill's words are the text.
  */
-import {
-  BrowserError,
-  PLAYWRIGHT_VERSION,
-  SCRIPT_LIMIT,
-  TIMEOUT_MAX_MS,
-  TIMEOUT_MIN_MS,
-  TIMEOUT_DEFAULT_MS,
-} from "./core.js";
+import { BrowserError, formatSnapshot, formatView } from "./core.js";
 
-/* ------------------------------------------------------------------ *
- * Command line
- * ------------------------------------------------------------------ */
+/** @typedef {{ flags: Record<string, "bool" | "value">, positionals: number, missing: string[], usage: string, summary: string }} CommandSpec */
 
-/** @typedef {{ flags: Record<string, "bool" | "value">, positionals: number, usage: string, summary: string }} CommandSpec */
-
-/** Every command answers `--help` without treating it as a script value. */
 const HELP = { "--help": "bool", "-h": "bool" };
+const THREAD = { "--thread": "value", "--json": "bool", ...HELP };
 
 /** @type {Record<string, CommandSpec>} */
 export const COMMANDS = {
-  prepare: {
-    flags: { "--json": "bool", ...HELP },
-    positionals: 0,
-    usage: "prepare",
-    summary: "Install the browser runtime if it is missing",
-  },
   open: {
-    flags: { "--headed": "bool", "--thread": "value", "--json": "bool", ...HELP },
+    flags: { ...THREAD },
+    positionals: 1,
+    missing: ["missing url"],
+    usage: "open <url> [--thread <id>] [--json]",
+    summary: "Open the built-in Browser tab on an address",
+  },
+  status: {
+    flags: { ...THREAD },
     positionals: 0,
-    usage: "open [--headed] [--thread <id>] [--json]",
-    summary: "Open a session for this thread",
+    missing: [],
+    usage: "status [--thread <id>] [--json]",
+    summary: "Read the page this thread is driving",
   },
-  list: {
-    flags: { "--thread": "value", "--json": "bool", ...HELP },
+  snapshot: {
+    flags: { ...THREAD },
     positionals: 0,
-    usage: "list [--thread <id>] [--json]",
-    summary: "List this thread's sessions",
+    missing: [],
+    usage: "snapshot [--thread <id>] [--json]",
+    summary: "Read the page, including whole-number refs",
   },
-  run: {
-    flags: {
-      "--script": "value",
-      "--script-file": "value",
-      "--timeout-ms": "value",
-      "--timeout": "value",
-      "--thread": "value",
-      "--json": "bool",
-      ...HELP,
-    },
+  goto: {
+    flags: { ...THREAD },
     positionals: 1,
-    usage: "run <session-id> (--script <js> | --script-file <path>) [--timeout-ms <n>] [--json]",
-    summary: "Run a trusted script in a session",
+    missing: ["missing url"],
+    usage: "goto <url> [--thread <id>] [--json]",
+    summary: "Load another address in the open page",
   },
-  pages: {
-    flags: { "--thread": "value", "--json": "bool", ...HELP },
-    positionals: 1,
-    usage: "pages <session-id> [--json]",
-    summary: "List the session's pages",
+  back: {
+    flags: { ...THREAD },
+    positionals: 0,
+    missing: [],
+    usage: "back [--thread <id>] [--json]",
+    summary: "Go back",
   },
-  screenshot: {
-    flags: { "--page": "value", "--thread": "value", "--json": "bool", ...HELP },
-    positionals: 1,
-    usage: "screenshot <session-id> [--page main] [--json]",
-    summary: "Save a JPEG of a page",
+  forward: {
+    flags: { ...THREAD },
+    positionals: 0,
+    missing: [],
+    usage: "forward [--thread <id>] [--json]",
+    summary: "Go forward",
   },
-  preview: {
-    flags: { "--thread": "value", "--json": "bool", ...HELP },
-    positionals: 1,
-    usage: "preview <session-id> [--json]",
-    summary: "Describe the panel's live frame",
+  reload: {
+    flags: { ...THREAD },
+    positionals: 0,
+    missing: [],
+    usage: "reload [--thread <id>] [--json]",
+    summary: "Reload the page",
   },
-  stop: {
-    flags: { "--thread": "value", "--json": "bool", ...HELP },
+  click: {
+    flags: { ...THREAD },
     positionals: 1,
-    usage: "stop <session-id> [--json]",
-    summary: "Stop Chrome, keeping the session record",
+    missing: ["missing ref"],
+    usage: "click <ref> [--thread <id>] [--json]",
+    summary: "Click a whole-number ref from the latest snapshot",
+  },
+  fill: {
+    flags: { ...THREAD },
+    positionals: 2,
+    missing: ["missing ref", "missing text"],
+    usage: "fill <ref> <text> [--thread <id>] [--json]",
+    summary: "Write text into a control. The text is the argument, not a file",
+  },
+  type: {
+    flags: { ...THREAD },
+    positionals: 1,
+    missing: ["missing text"],
+    usage: "type <text> [--thread <id>] [--json]",
+    summary: "Type text into the focused control",
+  },
+  press: {
+    flags: { ...THREAD },
+    positionals: 1,
+    missing: ["missing key"],
+    usage: "press <key> [--thread <id>] [--json]",
+    summary: "Press a key in the focused control",
+  },
+  select: {
+    flags: { ...THREAD },
+    positionals: 2,
+    missing: ["missing ref", "missing option"],
+    usage: "select <ref> <option> [--thread <id>] [--json]",
+    summary: "Choose an option in a select, by value or label",
+  },
+  scroll: {
+    flags: { ...THREAD },
+    positionals: 1,
+    missing: ["missing distance"],
+    usage: "scroll <dy> [--thread <id>] [--json]",
+    summary: "Scroll by dy pixels. Positive is down",
   },
   close: {
-    flags: { "--thread": "value", "--json": "bool", ...HELP },
-    positionals: 1,
-    usage: "close <session-id> [--json]",
-    summary: "Stop Chrome and clear the profile",
+    flags: { ...THREAD },
+    positionals: 0,
+    missing: [],
+    usage: "close [--thread <id>] [--json]",
+    summary: "Stop driving the page and leave it open",
   },
 };
 
 export const USAGE = [
   "Usage: kg browser-automation <command> [options]",
   "",
+  "Drives the built-in Browser tab. One http or https page per window.",
+  "",
   ...Object.values(COMMANDS).map((spec) => `  ${spec.usage}\n      ${spec.summary}`),
 ].join("\n");
 
+const NEGATIVE = /^-\d+(\.\d+)?$/;
+
 /**
+ * @param {string} command
  * @param {string[]} argv
  * @returns {{ command: string, flags: Record<string, string | true>, positionals: string[] }}
  */
-export function parseCommand(argv) {
-  const [command, ...rest] = argv;
+export function parseCommand(command, argv) {
   if (!command) {
     throw new BrowserError("missing command", "unknown_command", USAGE);
   }
@@ -110,9 +139,13 @@ export function parseCommand(argv) {
   const flags = {};
   /** @type {string[]} */
   const positionals = [];
-  for (let at = 0; at < rest.length; at += 1) {
-    const token = rest[at];
-    if (!token.startsWith("-")) {
+  for (let at = 0; at < argv.length; at += 1) {
+    const token = argv[at];
+    if (token === "--") {
+      positionals.push(...argv.slice(at + 1));
+      break;
+    }
+    if (!token.startsWith("-") || NEGATIVE.test(token)) {
       positionals.push(token);
       continue;
     }
@@ -120,23 +153,42 @@ export function parseCommand(argv) {
     const name = split === -1 ? token : token.slice(0, split);
     const kind = spec.flags[name];
     if (!kind) {
-      throw new BrowserError(`unknown option '${name}'`, "invalid_option", `Usage: kg browser-automation ${spec.usage}`);
+      throw new BrowserError(
+        `unknown option '${name}'`,
+        "invalid_option",
+        `Usage: kg browser-automation ${spec.usage}`,
+      );
     }
     if (Object.hasOwn(flags, name)) {
-      throw new BrowserError(`'${name}' was given more than once`, "invalid_option", `Usage: kg browser-automation ${spec.usage}`);
+      throw new BrowserError(
+        `'${name}' was given more than once`,
+        "invalid_option",
+        `Usage: kg browser-automation ${spec.usage}`,
+      );
     }
     if (kind === "bool") {
       if (split !== -1) {
-        throw new BrowserError(`'${name}' takes no value`, "invalid_option", `Usage: kg browser-automation ${spec.usage}`);
+        throw new BrowserError(
+          `'${name}' takes no value`,
+          "invalid_option",
+          `Usage: kg browser-automation ${spec.usage}`,
+        );
       }
       flags[name] = true;
       continue;
     }
-    const value = split === -1 ? rest[(at += 1)] : token.slice(split + 1);
+    const value = split === -1 ? argv[(at += 1)] : token.slice(split + 1);
     if (value === undefined || value === "") {
-      throw new BrowserError(`missing value for '${name}'`, "invalid_option", `Usage: kg browser-automation ${spec.usage}`);
+      throw new BrowserError(
+        `missing value for '${name}'`,
+        "invalid_option",
+        `Usage: kg browser-automation ${spec.usage}`,
+      );
     }
     flags[name] = value;
+  }
+  if (flags["--help"] || flags["-h"]) {
+    return { command, flags, positionals };
   }
   if (positionals.length > spec.positionals) {
     throw new BrowserError(
@@ -146,150 +198,42 @@ export function parseCommand(argv) {
     );
   }
   if (positionals.length < spec.positionals) {
-    throw new BrowserError("missing session id", "invalid_option", `Usage: kg browser-automation ${spec.usage}`);
+    throw new BrowserError(
+      spec.missing[positionals.length] ?? "missing argument",
+      "invalid_option",
+      `Usage: kg browser-automation ${spec.usage}`,
+    );
   }
   return { command, flags, positionals };
 }
 
-/**
- * @param {string | undefined} requested
- * @param {string | undefined} contextThread
- */
-export function resolveThread(requested, contextThread) {
-  const threadId = requested ?? contextThread;
-  if (!threadId) {
-    throw new BrowserError(
-      "run from a thread or pass --thread <id>",
-      "thread_required",
-    );
-  }
-  if (contextThread && threadId !== contextThread) {
-    throw new BrowserError(
-      "a call from a thread cannot use another thread's browser session",
-      "cross_thread",
-    );
-  }
-  return threadId;
-}
-
-/**
- * `90s`, `2m`, `1500ms`. A bare number is seconds when 1-120, otherwise
- * milliseconds when 1000-120000.
- * @param {string} value
- */
-export function parseDuration(value) {
-  const text = String(value).trim();
-  const match = /^(\d+)(ms|s|m)?$/.exec(text);
-  if (!match) {
-    throw new BrowserError(`invalid duration '${value}'; use 90s, 2m or 1500ms`, "invalid_timeout");
-  }
-  const amount = Number(match[1]);
-  const unit = match[2] ?? (amount >= TIMEOUT_MIN_MS ? "ms" : "s");
-  if (unit === "ms") return amount;
-  if (unit === "m") return amount * 60_000;
-  return amount * 1_000;
-}
-
-/** @param {unknown} value */
-export function boundedTimeout(value) {
-  const number = Number(value);
-  if (!Number.isInteger(number) || number < TIMEOUT_MIN_MS || number > TIMEOUT_MAX_MS) {
-    throw new BrowserError(
-      `invalid timeout; expected an integer between ${TIMEOUT_MIN_MS} and ${TIMEOUT_MAX_MS} milliseconds`,
-      "invalid_timeout",
-    );
-  }
-  return number;
-}
-
-/** @param {Record<string, string | true>} flags */
-export function timeoutOf(flags) {
-  const exact = flags["--timeout-ms"];
-  const duration = flags["--timeout"];
-  if (exact !== undefined && duration !== undefined) {
-    throw new BrowserError("pass either --timeout or --timeout-ms, not both", "invalid_option");
-  }
-  if (exact === undefined && duration === undefined) return TIMEOUT_DEFAULT_MS;
-  return boundedTimeout(duration === undefined ? exact : parseDuration(String(duration)));
-}
-
-/** @param {Record<string, string | true>} flags */
-export function scriptOf(flags) {
-  const script = flags["--script"];
-  const scriptFile = flags["--script-file"];
-  if ((script === undefined) === (scriptFile === undefined)) {
-    throw new BrowserError("pass exactly one of --script or --script-file", "invalid_option");
-  }
-  if (typeof script === "string") {
-    if (script.trim() === "") {
-      throw new BrowserError("--script is empty", "invalid_option");
-    }
-    if (script.length > SCRIPT_LIMIT) {
-      throw new BrowserError(`--script is longer than ${SCRIPT_LIMIT} characters`, "invalid_option");
-    }
-  }
-  return {
-    script: typeof script === "string" ? script : undefined,
-    scriptFile: typeof scriptFile === "string" ? scriptFile : undefined,
-  };
-}
-
-/* ------------------------------------------------------------------ *
- * Human output
- * ------------------------------------------------------------------ */
-
-/** @param {any} result */
-function imagesOf(result) {
-  return Array.isArray(result?.images) ? result.images : [];
-}
-
-/** @param {any} result */
-export function outputText(result) {
-  const text = typeof result?.text === "string" ? result.text : "";
-  const images = imagesOf(result)
-    .map((image) => `\nimage: ${image.path} (${image.width}x${image.height})`)
-    .join("");
-  return `${text || "(ok)"}${images}`;
+/** @param {string} command */
+export function commandHelp(command) {
+  const spec = COMMANDS[command];
+  if (!spec) return USAGE;
+  return [`Usage: kg browser-automation ${spec.usage}`, "", spec.summary].join("\n");
 }
 
 /**
  * The line a person sees without `--json`.
  * @param {string} command
  * @param {any} result
+ * @param {any[]} args
  */
-export function humanOutput(command, result) {
-  if (command === "prepare") {
-    return `Browser runtime ready (playwright-core ${result?.version ?? PLAYWRIGHT_VERSION}).`;
-  }
-  if (command === "open") {
-    const mode = result?.headless === false ? "headed" : "headless";
-    return `Session ${result?.id} open (${mode} Chrome).`;
-  }
-  if (command === "list") {
-    const sessions = Array.isArray(result) ? result : [];
-    if (sessions.length === 0) return "No sessions for this thread.";
-    return sessions
-      .map((session) => {
-        const expired = session.expiresAt <= Date.now() ? " expired" : "";
-        return `${session.id}  ${session.state}${expired}  ${session.url ?? "about:blank"}`;
-      })
-      .join("\n");
-  }
-  if (command === "preview") {
-    if (!result?.frame) return "No new frame.";
-    const frame = result.frame;
-    return `Frame ${frame.sequence} ${frame.width}x${frame.height} ${frame.url} ${frame.title}`.trim();
-  }
-  if (command === "stop") return `Stopped ${result?.id}.`;
-  if (command === "close") return `Closed ${result?.id}.`;
-  if (command === "screenshot") {
-    const image = imagesOf(result)[0];
-    return image ? `Screenshot saved to ${image.path}` : "(no screenshot)";
-  }
-  return outputText(result);
-}
-
-/** @param {string} usage */
-export function commandHelp(usage) {
-  return `Usage: kg browser-automation ${usage}`;
+export function humanOutput(command, result, args) {
+  if (command === "open") return `Opened ${formatView(result)}`;
+  if (command === "status") return formatView(result);
+  if (command === "snapshot") return formatSnapshot(result);
+  if (command === "goto") return `Loaded ${args[0]}.`;
+  if (command === "click") return `Clicked ${args[0]}.`;
+  if (command === "fill") return `Filled ${args[0]}.`;
+  if (command === "type") return "Typed.";
+  if (command === "press") return `Pressed ${args[0]}.`;
+  if (command === "select") return `Selected ${args[1]}.`;
+  if (command === "scroll") return `Scrolled ${args[0]}.`;
+  if (command === "back") return "Went back.";
+  if (command === "forward") return "Went forward.";
+  if (command === "reload") return "Reloaded.";
+  if (command === "close") return "Stopped driving the page. It stays open.";
+  return "Done.";
 }

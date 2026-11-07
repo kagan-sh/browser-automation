@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["key"],
+  "properties": {
+    "key": {
+      "type": "string",
+      "minLength": 1,
+      "description": "enter, escape, tab, space, backspace, delete, up, down, left, right, home, end, pageup, pagedown, or one character."
+    }
+  }
+}

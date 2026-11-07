@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["url"],
+  "properties": {
+    "url": {
+      "type": "string",
+      "minLength": 1,
+      "description": "An http or https address, a bare name such as example.com, or a local host such as localhost:3000."
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ref"],
+  "properties": {
+    "ref": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "A whole-number ref from the latest snapshot."
+    }
+  }
+}

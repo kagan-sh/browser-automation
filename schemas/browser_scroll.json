@@ -2,11 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId"],
+  "required": ["dy"],
   "properties": {
-    "sessionId": {
-      "type": "string",
-      "description": "Session id from browser_open."
+    "dy": {
+      "type": "number",
+      "description": "Pixels to scroll. Positive is down."
     }
   }
 }
